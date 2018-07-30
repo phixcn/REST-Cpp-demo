@@ -2,148 +2,141 @@
 //  
 //  NetworkRequest.cpp  
 //  
-//  Created by duzixi.com on 15/8/25.  
+//  18/5/12.  修改PostRequest方法： http为https SSL环境设置参考：http://www.jb51.net/article/119025.htm
 //  
 
 #include "NetworkRequest.h"  
+#include<tchar.h>
+#include<WinSock2.h>
+#include<WS2tcpip.h>
+#include<iostream>
+#include<openssl\ssl.h>
+#pragma comment(lib,"ws2_32.lib")
+#pragma comment(lib,"libssl.lib")
+#pragma comment(lib,"libcrypto.lib")
+CONST INT RECV_SIZE = 8192;
 
 using namespace std;
 using namespace boost;
 using boost::asio::ip::tcp;
 
 // POST请求  
-CString PostRequest(CString CShost, CString path, CString form)
+
+
+CString PostRequest(CString CShost, CString path, CString form)//PostHttpSSL  来自http://www.jb51.net/article/119025.htm
 {
-	char *host = CShost.GetBuffer(CShost.GetLength());
+	//启动wsa
+	WSADATA wsadData;
+	WSAStartup(MAKEWORD(2, 2), &wsadData);
+
+	//获取Host的IP地址等信息
+	ADDRINFOT aiHints;
+	ZeroMemory(&aiHints, sizeof(ADDRINFOT));
+	aiHints.ai_family = AF_INET;
+	aiHints.ai_flags = AI_PASSIVE;
+	aiHints.ai_protocol = 0;
+	aiHints.ai_socktype = SOCK_STREAM;
+	std::string wstrHost = CShost;
+	PADDRINFOT paiResult;
+	GetAddrInfo(wstrHost.c_str(), NULL, &aiHints, &paiResult);
+
+	//创建套接字
+	SOCKET sSocket = socket(AF_INET, SOCK_STREAM, 0);
+	if (sSocket == SOCKET_ERROR)
+	{
+		std::wcout << "Error socket" << std::endl;
+		return "socket_error";
+	}
+
+	//连接Host
+	SOCKADDR_IN sinHost;
+	sinHost.sin_addr = ((LPSOCKADDR_IN)paiResult->ai_addr)->sin_addr;
+	sinHost.sin_family = AF_INET;
+	sinHost.sin_port = htons(443);
+	if (connect(sSocket, (LPSOCKADDR)&sinHost, sizeof(SOCKADDR_IN)) == SOCKET_ERROR)
+	{
+		std::wcout << "Error connect" << std::endl;
+		return "connect_error";
+	}
+
+	//初始化OpenSSL库
+	//（虽然不知道为什么，但是不加这三行似乎并不会导致什么问题，在不加这3行的情况下测试了几个网站并没有发现任何问题喵）
+	SSL_library_init();
+	SSLeay_add_ssl_algorithms();
+	SSL_load_error_strings();
+
+	//创建SSL会话环境等
+	SSL_CTX *pctxSSL = SSL_CTX_new(TLSv1_2_client_method());
+	if (pctxSSL == NULL)
+	{
+		std::wcout << "Error SSL_CTX_new" << std::endl;
+		return "Error SSL_CTX_new";
+	}
+	SSL *psslSSL = SSL_new(pctxSSL);
+	if (psslSSL == NULL)
+	{
+		std::wcout << "Error SSL_new" << std::endl;
+		return "Error SSL_new";
+	}
+	SSL_set_fd(psslSSL, sSocket);
+	INT iErrorConnect = SSL_connect(psslSSL);
+	if (iErrorConnect < 0)
+	{
+		std::wcout << "Error SSL_connect, iErrorConnect=" << iErrorConnect << std::endl;
+		return "Error SSL_connect";
+	}
+	std::wcout << "SSL connection using " << SSL_get_cipher(psslSSL) << std::endl;
+
+	//发包
+
+	/*char *host = CShost.GetBuffer(CShost.GetLength());
+	long length = form.GetLength();*/
+	string host = CShost.GetBuffer(0);
+	string str = form.GetBuffer(0);
+	//int slength = str.length();
+	ostringstream slength;
+	slength << str.length();
+	
 	long length = form.GetLength();
-	//form.Replace("\t", "");
-	// 声明Asio基础: io_service（任务调度机）  
-	boost::asio::io_service io_service;
-
-	// 获取服务器终端列表  
-	tcp::resolver resolver(io_service);
-	tcp::resolver::query query(host, "http");
-	tcp::resolver::iterator iter = resolver.resolve(query);
-
-	// 尝试连接每一个终端，直到成功建立socket连接  
-	tcp::socket socket(io_service);
- 	try
- 	{
-		boost::asio::connect(socket, iter);
-//		cout << "boost::asio::connect(socket, iter);" << endl;
- 	}
- 	catch (boost::system::system_error ec)
- 	{
-		cout << ec.what()<<endl;
-		//throw boost::system::system_error(ec);
-		//cout << "connect_error:" << ec <<endl;
- 		return "connect_error";
- 	}
-
-	// 构建网络请求头  
-	// 指定 "Connection: close" 在获取应答后断开连接，确保获文件全部数据。  
-	boost::asio::streambuf request;
-	ostream request_stream(&request);
-	request_stream << "POST " << path << " HTTP/1.1\r\n";
-	request_stream << "Host: " << host << "\r\n";
-	request_stream << "User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.71 Safari/537.36\r\n";
+	std::string strWrite = "POST "; 
+	strWrite += path + " HTTP/1.1\r\n";
+	strWrite += "Host: " + host + "\r\n";
+	strWrite += "User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.71 Safari/537.36\r\n";
 	//request_stream << "Accept: */*\r\n";
-	request_stream << "Content-Type:application/json\r\n";
-	request_stream << "Content-Length: " << length << "\r\n";
-	request_stream << "Connection: close\r\n\r\n"; // 注意这里是两个空行  
-	request_stream << form; //POST 发送的数据本身不包含多于空行  
-
-							// 发送请求  
-	boost::asio::write(socket, request);
-
-	//cout << "boost::asio::write(socket, request);" << endl;
-	// 读取应答状态. 应答缓冲流 streambuf 会自动增长至完整的行  
-	// 该增长可以在构造缓冲流时通过设置最大值限制  
-	boost::asio::streambuf response;
-	try
+	strWrite += "Content-Type:application/json\r\n";
+	strWrite += "Content-Length: " + slength.str() + "\r\n";
+	strWrite += "Connection: close\r\n\r\n"; // 注意这里是两个空行  
+	strWrite += form; //POST 发送的数据本身不包含多于空行   
+	INT iErrorWrite = SSL_write(psslSSL, strWrite.c_str(), strWrite.length()) < 0;
+	if (iErrorWrite < 0)
 	{
-		boost::asio::read_until(socket, response, "\r\n");
+		std::wcout << "Error SSL_write" << std::endl;
+		return "Error SSL_write";
 	}
-	catch (...)
-	{
-			//cout << ec.what() << endl;
-			//throw boost::system::system_error(ec);
-			//cout << "connect_error:" << ec <<endl;
-			return "connect_error";
-	}
-	//cout << "boost::asio::read_until(socket, response, \"\\r\\n\");" << endl;
-	// 检查应答是否OK.  
-	istream response_stream(&response);// 应答流  
-	string http_version;
-	response_stream >> http_version;
-	unsigned int status_code;
-	response_stream >> status_code;
-	string status_message;
-	getline(response_stream, status_message);
-	if (!response_stream || http_version.substr(0, 5) != "HTTP/")
-	{
-		printf(" error 无效响应\n");
-	}
-	if (status_code != 200)
-	{
-		printf(" error 响应返回 status code %d\n", status_code);
-	}
-	//cout << "getline(response_stream, status_message);" << endl;
 
-	// 读取应答头部，遇到空行后停止  
-	boost::asio::read_until(socket, response, "\r\n\r\n");
-
-	//cout << "boost::asio::read_until" << endl;
-	// 显示应答头部  
-	string header;
-	int len = 0;
-	while (getline(response_stream, header) && header != "\r")
+	//收包并输出
+	//这里接受的是char形式的，所以中文会乱码
+	//如果要正常显示中文，需要再转换为wchar_t或std::wstring
+	LPSTR lpszRead = new CHAR[RECV_SIZE];
+	CString CstrRead;
+	INT iLength = 1;
+	while (iLength >= 1)
 	{
-		if (header.find("Content-Length: ") == 0) {
-			stringstream stream;
-			stream << header.substr(16);
-			stream >> len;
+		iLength = SSL_read(psslSSL, lpszRead, RECV_SIZE - 1);
+		if (iLength < 0)
+		{
+			std::wcout << "Error SSL_read" << std::endl;
+			delete[] lpszRead;
+			return "Error SSL_read";
 		}
+		lpszRead[iLength] = TEXT('\0');
+		//std::wcout << lpszRead;
+		CstrRead+= lpszRead;
 	}
+	delete[] lpszRead;
 
-	long size = response.size();
-
-	if (size > 0) {
-		// .... do nothing  
-	}
-
-	// 循环读取数据流，直到文件结束  
-	boost::system::error_code error;
-	while (boost::asio::read(socket, response, boost::asio::transfer_at_least(1), error))
-	{
-		// 获取应答长度  
-		size = response.size();
-		if (len != 0) {
-			//cout << size << "  Byte  " << (size * 100) / len << "%\n";
-		}
-
-	}
-
-	//cout << "boost::asio::read" << endl;
-	if (error != boost::asio::error::eof)
-	{
-		throw boost::system::system_error(error);
-	}
-
-	//cout << size << " Byte 内容已下载完毕." << endl;
-
-	// 将streambuf类型转换为CString类型返回  
-	istream is(&response);
-	is.unsetf(ios_base::skipws);
-	string sz;
-	sz.append(istream_iterator<char>(is), istream_iterator<char>());
-	//cout << "发送结束;" << endl;
-
-	// 返回转换后的字符串  
-	return sz.c_str();
+	return CstrRead;
 }
-
-
 
 CString GetRequest(CString sendmsg)
 {
@@ -166,6 +159,7 @@ CString GetRequest(CString sendmsg)
 		return "Can't InternetOpenUrl!";
 	}
 	CString buffs = "";
+	Sleep(1);
 	while (1) {
 		internetreadfile = InternetReadFile(internetopenurl, buffer, sizeof(char), &byteread);
 		if (byteread == 0) {
@@ -178,6 +172,10 @@ CString GetRequest(CString sendmsg)
 	{
 		InternetCloseHandle(internetopenurl);
 		return "Can't InternetReadFile!";
+	}
+	if (buffs.GetLength() == 0)
+	{
+		buffs = "error";
 	}
 	return buffs;
 }
